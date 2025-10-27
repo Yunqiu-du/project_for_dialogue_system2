@@ -1,0 +1,35 @@
+* Parrot statechart (updated from Maraev et. al 2025) 🦜
+
+#+begin_src plantuml :results value file :file parrot.svg :exports results
+hide empty description
+
+state ParrotISU as "Parrot ISU"
+state ParrotISU #lightblue {
+  state Interpret {
+    [*] -> Idle
+    Idle -> Recognising: SPEAK_COMPLETE
+    Recognising -> Idle: LISTEN_COMPLETE\n/raise  SAYS:$lastResult
+    Recognising --> Recognising: RECOGNISED\n/assign $lastResult := event.value[0].utterance
+    Recognising: entry /listen
+  }
+  --
+  state Generate {
+    state Idle2 as "Idle"
+    [*] -> Idle2
+    Idle2 -> Speaking: NEXT_MOVE
+    Speaking: entry /speak:$event.val
+    Speaking -> Idle2: SPEAK_COMPLETE
+  }
+  --
+  state Process {
+    [*] -> Select
+    Select -> Update: ($is.lm != "")/raise NEXT_MOVE:$is.lm
+    Update: entry /assign $is.lm := ""
+    Update -> Select: SAYS:$val /assign $is.lm := $val 
+  }
+  Process: entry /assign $is.lm := "ping"
+}
+#+end_src
+
+#+RESULTS:
+[[file:parrot.svg]]
