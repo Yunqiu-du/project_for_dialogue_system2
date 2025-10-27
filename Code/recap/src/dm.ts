@@ -2,7 +2,7 @@ import { assign, createActor,  setup, fromPromise} from "xstate";
 import { speechstate } from "speechstate";
 import type { Settings } from "speechstate";
 import type { DMEvents, DMContext, Message} from "./types";
-import { KEY } from "./azure";
+import { KEY } from "./azure.ts";
 
 const azureCredentials = {
   endpoint:
@@ -35,10 +35,26 @@ const dmMachine = setup({
       )
     ),
     modelReply : fromPromise<any, Message[]> (({input}) => {
+      const contradictionResult = input.find(
+        (m: any) => m.role === "system" && m.content.startsWith("Contradiction analysis")
+      );
+      
+      // 给 LLM 一个清晰的指令，让它参考矛盾检测结果
+      const systemPrompt = {
+        role: "system",
+        content: `You are a contradiction-resolving dialogue assistant. 
+The contradiction detection result is: "${contradictionResult?.content || "unknown"}". 
+If there is a contradiction, politely explain or correct it before continuing the conversation.`,
+      };
+      const fullMessages = [
+        systemPrompt,
+        ...input.filter((m: any) => m.role !== "system" || !m.content.startsWith("Contradiction analysis")),
+      ];
+
       const body = {
         model: "llama3:latest",
         stream: false,
-        messages: input,
+        messages: fullMessages,
         temperature : 0.8,
       };
       return fetch("http://localhost:11434/api/chat", {
@@ -46,7 +62,19 @@ const dmMachine = setup({
         body: JSON.stringify(body),
       }).then((response) => response.json());
     }
-    ) 
+    ), 
+    contradictionCheck: fromPromise<any, Message[]>(({ input }) => {
+      const body = {
+        model: "contradiction-model:latest",
+        stream: false,
+        messages: input,
+        temperature: 0,
+      };
+      return fetch("http://localhost:11434/api/chat", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }).then((response) => response.json());
+    }),
   },
 }).createMachine({
   id: "DM",
@@ -110,7 +138,7 @@ const dmMachine = setup({
         entry: "sst_listen",
         on: {
           LISTEN_COMPLETE:{
-            target:"ChatCompletion"
+            target:"CheckContradiction"
           },
           RECOGNISED:{
             actions: assign(({ event, context }) => ({
@@ -120,7 +148,7 @@ const dmMachine = setup({
             })),
           },
           ASR_NOINPUT:{
-            target: "ChatCompletion",
+            target: "CheckContradiction",
             actions: assign(({context}) => ({
               messages:[
                 ...context.messages,
@@ -131,6 +159,32 @@ const dmMachine = setup({
         },
       },
 
+      CheckContradiction: {
+        invoke: {
+          src: "contradictionCheck",
+          input: (context) => context.context.messages,
+          onDone: {
+            target: "ChatCompletion",
+            actions: assign(({ event, context}) => {
+              // 假设 event.output.message.content 返回 "CONTRADICTION" 或 "NO_CONTRADICTION"
+              const result = 
+              event.output.message?.content?.toLowerCase?.() ||
+              event.output[0]?.message?.content?.toLowerCase?.() ||
+              "unknown";
+              return {
+                messages: [
+                  ...context.messages,
+                  {
+                    role: "system",
+                    content: `Contradiction analysis result: ${result}`,
+                  },
+                ],
+              };
+            }),
+          }
+        },
+      },
+
       ChatCompletion:{
         invoke:{
           src: "modelReply",
@@ -138,11 +192,15 @@ const dmMachine = setup({
           onDone:{
             target: "Speaking",
             actions: assign(({event, context}) => {
+              const reply =
+              event.output.message?.content ||
+              event.output[0]?.message?.content ||
+              "(no reply)";
               console.log("Raw output:", event.output);
               return {
                 messages:[
                   ...context.messages,
-                  {role:"assistant",content: event.output.message.content},
+                  {role:"assistant",content: reply},
                 ]
               }
             })
